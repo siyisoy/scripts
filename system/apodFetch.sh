@@ -155,6 +155,8 @@ DownloadPicture()
 
     
     today=$(date +"%Y%m%d")
+    # As a solution to APOD's ban for my corporate ips, I use a second remote machine to download APOD's pictures :)
+
     remotepath=user@<ip>:<path>/"$today".jpg
     if [ ! -f $fileFullPath ]; then
 	scp "$remotepath" "$fileFullPath" 
