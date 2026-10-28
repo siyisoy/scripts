@@ -1,222 +1,407 @@
-#!/bin/bash
+bash
+#!/usr/bin/env bash
 
-#https://github.com/taurhine/apodFetch
+# https://github.com/taurhine/apodFetch
+# Updated to use NASA's current APOD endpoint.
+# Compatible with ImageMagick 7.
+
+set -o pipefail
 
 ##################
-# static options #
-######################################################
+# Static options #
+##################
 
-#default scale mode
 defaultScaleMode="fill"
 
-#effect to be applied to lock-screen  background
-# effectOpt=""
+# Effects applied to the lock-screen background
 effectOpt="-paint 2 -noise 10"
 
-#show description as notification on wallpaper change
+# Show description as notification on wallpaper change
 descAsNotification="disabled"
 
-#show apodFetch messages as notification
+# Show apodFetch messages as notifications
 messagesAsNotification="enabled"
 
-#show description in lock-screen
+# Show description on lock-screen
 lockscreenDesc="enabled"
 
 ######################################################
 
 hashNameExt=".apodcache"
-wpPath="/home/""$(whoami)""/Documents/wallpapers/apod"
-cachePath="/home/""$(whoami)"
-linkPrefix="https://apod.nasa.gov/apod"
+wpPath="$HOME/Documents/wallpapers/apod"
+cachePath="$HOME"
+apiPrefix="https://science.nasa.gov/wp-json/wp/v2/apod-basic"
+
+targetDate=""
+scaleMode="$defaultScaleMode"
+description=""
+title=""
+mediaType=""
+fileFullPath=""
 
 ShowMessage()
 {
-    if test "$messagesAsNotification" = "enabled"; then
-        notify-send "$1" "$2"
+    if [[ "$messagesAsNotification" == "enabled" ]] &&
+       command -v notify-send >/dev/null 2>&1; then
+        notify-send "$1" "$2" || echo "$1: $2"
     else
-        echo "$1" "$2"
+        echo "$1: $2"
     fi
 }
 
 CheckDependencies()
 {
-    echo "notify-send
-          feh
-          wget
-          awk
-          sed
-          convert
-          rdjpgcom
-          html2text" | while read commandDep
-    do
-        if test "$(command -v $commandDep)" = ""; then
-            case "$commandDep" in
-                "notify-send")
-                    messagesAsNotification="disabled"
-                    ShowMessage "apodFetch: error" "package libnotify is missing"
-                    ;;
-                "convert")
-                    ShowMessage "apodFetch: error" "package imagemagick is missing"
-                    ;;
-                "rdjpgcom")
-                    ShowMessage "apodFetch: error" "package libjpeg-progs is missing"
-                    ;;
-                *)
-                    ShowMessage "apodFetch: error" "package $commandDep is missing"
-                    ;;
-            esac
+    local missing=0
+    local dep
+
+    for dep in curl python3 magick feh xrandr; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            echo "Missing dependency: $dep" >&2
+            missing=1
         fi
     done
-    exit 1
+
+    if [[ "$missing" -ne 0 ]]; then
+        exit 1
+    fi
+
+    echo "All required dependencies are installed."
+    exit 0
 }
 
 EnsurePathExists()
 {
-    #create the destination path if it doesn't exist
-    if [ ! -d $1 ]; then
-        mkdir -p $1
-    fi
-
-    #abort execution if the path was not made
-    if [ ! -d $1 ]; then
-        ShowMessage "apodFetch: error" "Could not create ""\"$1\""
+    if ! mkdir -p "$1"; then
+        ShowMessage "apodFetch: error" "Cannot create directory: $1"
         exit 1
     fi
 }
 
 GetParameters()
 {
-    #initialise the scaleMode with the default setting
-    scaleMode=$defaultScaleMode
+    scaleMode="$defaultScaleMode"
 
-    #check the parameters to define the target date
-    case "$1" in
+    case "${1:-}" in
         "")
-            #by default the target date will be set to today
-            targetDate=`date +"%Y%m%d"`
+            targetDate="$(date +%Y%m%d)"
             ;;
+
         "-d")
             CheckDependencies
             ;;
+
         "-r")
-            randomDay="$(( ( RANDOM % 365 )  + 1 ))"
-            targetDate=`date --date "-$randomDay day" +"%Y%m%d"`
+            local randomDay
+            randomDay="$(( (RANDOM % 365) + 1 ))"
+            targetDate="$(date --date="-$randomDay days" +%Y%m%d)"
             ;;
+
         "-c")
-            #this option accepts numbers >= 0
-            if [[ $2 =~ ^[0-9]+$ ]]; then
-                targetDate=`date --date "-$2 day" +"%Y%m%d"`
-            elif test "$2" = "today"; then
-                targetDate=`date +"%Y%m%d"`
+            if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                targetDate="$(date --date="-${2} days" +%Y%m%d)"
+            elif [[ "${2:-}" == "today" ]]; then
+                targetDate="$(date +%Y%m%d)"
             else
-                ShowMessage "apodFetch: error" "invalid parameter for option -c ""$2"
+                ShowMessage "apodFetch: error" \
+                    "Invalid parameter for -c: ${2:-}"
                 exit 1
             fi
 
-            case "$3" in
+            case "${3:-}" in
                 "")
-                    scaleMode=$defaultScaleMode
+                    scaleMode="$defaultScaleMode"
                     ;;
                 "fill" | "fitall" | "center")
-                    scaleMode=$3
+                    scaleMode="$3"
                     ;;
                 *)
-                    ShowMessage "apodFetch: error" "unknown option ""$3"
+                    ShowMessage "apodFetch: error" \
+                        "Unknown scale mode: $3"
                     exit 1
                     ;;
             esac
             ;;
-            *)
-                ShowMessage "apodFetch: error" "unknown option ""$1"
-                exit 1
-                ;;
+
+        *)
+            ShowMessage "apodFetch: error" "Unknown option: $1"
+            exit 1
+            ;;
     esac
 }
 
 GetDescription()
 {
-    #read the description from the jpg file and escape the '
-    description=$(rdjpgcom $fileFullPath | sed "s/'/\\\'/g")
+    # Description is obtained from the NASA API, not JPEG comments.
+    :
 }
 
 ShowDescriptionAsNotification()
 {
-    if test "$descAsNotification" = "enabled"; then
-        notify-send -u critical "NASA Astronomy Picture for $targetDate" "$description"
+    if [[ "$descAsNotification" == "enabled" ]]; then
+        ShowMessage "NASA APOD: $targetDate" "$description"
     fi
 }
 
 DownloadPicture()
 {
-    fileName=$targetDate".jpg"
+    local isoDate
+    local jsonFile
+    local infoFile
+    local tmpFile
+    local imageUrl
+    local cachedImage="$wpPath/$targetDate.jpg"
 
-    #check if we already have a picture from that date
-    fileFullPath=$wpPath/$fileName
+    fileFullPath="$cachedImage"
+    isoDate="${targetDate:0:4}-${targetDate:4:2}-${targetDate:6:2}"
+    jsonFile="$(mktemp)"
+    infoFile="$(mktemp)"
 
-    
-    today=$(date +"%Y%m%d")
-    # As a solution to APOD's ban for my corporate ips, I use a second remote machine to download APOD's pictures :)
+    # Download today's (or the selected date's) APOD metadata.
+    if ! curl -fLsS --retry 3 --retry-delay 2 \
+        --get "$apiPrefix/" \
+        --data-urlencode "date=$isoDate" \
+        -o "$jsonFile"; then
 
-    remotepath=user@<ip>:<path>/"$today".jpg
-    if [ ! -f $fileFullPath ]; then
-	scp "$remotepath" "$fileFullPath" 
+        ShowMessage "apodFetch: error" \
+            "Could not retrieve NASA APOD metadata for $isoDate"
+        rm -f "$jsonFile" "$infoFile"
+        return 1
     fi
+
+    # Extract metadata safely, including HTML-formatted descriptions.
+    if ! python3 - "$jsonFile" > "$infoFile" <<'PY'
+import json
+import sys
+from html.parser import HTMLParser
+
+class TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def text(self, html):
+        self.parts = []
+        self.feed(html or "")
+        self.close()
+        return " ".join(" ".join(self.parts).split())
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+
+if isinstance(data, list):
+    if not data:
+        raise SystemExit("No APOD entry returned for this date")
+    item = data[0]
+else:
+    item = data
+
+extractor = TextExtractor()
+title = item.get("title", "NASA Astronomy Picture of the Day")
+description = extractor.text(item.get("explanation", ""))
+media_type = item.get("media_type", "")
+image_url = ""
+
+if media_type == "image":
+    for key in ("hdurl", "image_url", "url"):
+        value = item.get(key)
+        if isinstance(value, str) and value.startswith(("https://", "http://")):
+            image_url = value
+            break
+elif media_type == "video":
+    # Only use an explicit thumbnail/image field, never the video URL.
+    for key in ("thumbnail_url", "image_url"):
+        value = item.get(key)
+        if isinstance(value, str) and value.startswith(("https://", "http://")):
+            image_url = value
+            break
+
+for value in (title, description, media_type, image_url):
+    print(value.replace("\n", " ").replace("\r", " "))
+PY
+    then
+        ShowMessage "apodFetch: error" \
+            "Could not parse NASA's APOD response for $isoDate"
+        rm -f "$jsonFile" "$infoFile"
+        return 1
+    fi
+
+    mapfile -t apodInfo < "$infoFile"
+    rm -f "$jsonFile" "$infoFile"
+
+    title="${apodInfo[0]:-NASA APOD}"
+    description="${apodInfo[1]:-}"
+    mediaType="${apodInfo[2]:-}"
+    imageUrl="${apodInfo[3]:-}"
+
+    if [[ "$mediaType" != "image" && "$mediaType" != "video" ]]; then
+        ShowMessage "apodFetch: error" \
+            "Unsupported APOD media type: $mediaType"
+        return 1
+    fi
+
+    if [[ -z "$imageUrl" ]]; then
+        ShowMessage "apodFetch: info" \
+            "APOD for $isoDate is a video or has no usable image/thumbnail. Wallpaper unchanged."
+        return 1
+    fi
+
+    # Reuse a valid cached image. Remove empty or corrupted cache files.
+    if [[ -f "$cachedImage" ]] &&
+       magick identify "$cachedImage" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    rm -f "$cachedImage"
+
+    tmpFile="$(mktemp "$wpPath/.apod-download-XXXXXX")"
+
+    # Download into a temporary file so a failed download cannot leave
+    # an empty or partial JPEG in the cache.
+    if ! curl -fLsS --retry 3 --retry-delay 2 \
+        "$imageUrl" -o "$tmpFile" ||
+       [[ ! -s "$tmpFile" ]] ||
+       ! magick identify "$tmpFile" >/dev/null 2>&1; then
+
+        ShowMessage "apodFetch: error" \
+            "Download failed or returned an invalid image for $isoDate"
+        rm -f "$tmpFile"
+        return 1
+    fi
+
+    # Normalize the downloaded image to JPEG, regardless of its source
+    # extension or encoding.
+    if ! magick "$tmpFile" -strip "$cachedImage"; then
+        ShowMessage "apodFetch: error" \
+            "Could not convert downloaded image to JPEG"
+        rm -f "$tmpFile" "$cachedImage"
+        return 1
+    fi
+
+    rm -f "$tmpFile"
+
+    if [[ ! -s "$cachedImage" ]] ||
+       ! magick identify "$cachedImage" >/dev/null 2>&1; then
+        ShowMessage "apodFetch: error" \
+            "The cached image failed validation"
+        rm -f "$cachedImage"
+        return 1
+    fi
+
+    return 0
 }
 
 ScaleAndSetWallpaper()
 {
-    #make sure that the file exists
-    if [ ! -f $fileFullPath ]; then
-        ShowMessage "apodFetch: error" "File not found: $fileFullPath"
-        exit 1;
+    local screenRes
+    local screenW
+    local resizeMode
+    local -a effects
+
+    if [[ ! -s "$fileFullPath" ]] ||
+       ! magick identify "$fileFullPath" >/dev/null 2>&1; then
+        ShowMessage "apodFetch: error" \
+            "Missing or invalid image: $fileFullPath"
+        return 1
     fi
 
-    #get the current screen resolution
-    screenRes="$(xrandr --current | grep '\*' | awk -F ' ' '{print $1}')"
+    screenRes="$(xrandr --current |
+        awk '/\*/ {print $1; exit}')"
 
-    case $scaleMode in
+    if [[ ! "$screenRes" =~ ^[0-9]+x[0-9]+$ ]]; then
+        ShowMessage "apodFetch: error" \
+            "Could not determine screen resolution"
+        return 1
+    fi
+
+    case "$scaleMode" in
         "center")
-            resizeOpt=""
+            resizeMode=""
             ;;
         "fill")
-            screenW="$(echo $screenRes | awk -F 'x' '{print $1}')"
-            resizeOpt="-resize $screenW"
+            screenW="${screenRes%x*}"
+            resizeMode="-resize ${screenW}x"
+            ;;
+        "fitall")
+            resizeMode="-resize ${screenRes}"
             ;;
         *)
-            resizeOpt="-resize $screenRes"
+            resizeMode="-resize ${screenRes}"
             ;;
     esac
 
-    #scale and resize the picture for the current resolution
-    magick convert -background black $resizeOpt -extent $screenRes -gravity center -quiet $fileFullPath $wpPath"/apod.png"
-
-    GetDescription
-
-    if test "$effectOpt" = ""; then
-        #no effect selected, copy the same file
-        cp $wpPath"/apod.png" $wpPath"/apod_lock.png"
+    # Resize and center the wallpaper on a black canvas.
+    if [[ -n "$resizeMode" ]]; then
+        # The configured resize mode is constructed from numeric resolution
+        # values and is intentionally split into ImageMagick arguments.
+        # shellcheck disable=SC2086
+        if ! magick "$fileFullPath" $resizeMode \
+            -background black -gravity center \
+            -extent "$screenRes" "$wpPath/apod.png"; then
+            ShowMessage "apodFetch: error" "Wallpaper scaling failed"
+            return 1
+        fi
     else
-        magick convert $effectOpt $wpPath"/apod.png" -quiet $wpPath"/apod_lock.png"
+        if ! magick "$fileFullPath" \
+            -background black -gravity center \
+            -extent "$screenRes" "$wpPath/apod.png"; then
+            ShowMessage "apodFetch: error" "Wallpaper scaling failed"
+            return 1
+        fi
     fi
 
-    #add description to the lock-screen
-    if test "$lockscreenDesc" = "enabled"; then
-        magick convert -quiet -pointsize 20 -fill white -undercolor black -draw "text 10,20 '$description' " $wpPath"/apod_lock.png" $wpPath"/apod_lock.png"
+    if [[ ! -s "$wpPath/apod.png" ]]; then
+        ShowMessage "apodFetch: error" "Wallpaper PNG was not created"
+        return 1
     fi
 
-    #set the wallpaper
-    feh --no-fehbg --bg-tile $wpPath"/apod_lock.png"
+    if [[ -n "$effectOpt" ]]; then
+        read -r -a effects <<< "$effectOpt"
+
+        if ! magick "${effects[@]}" "$wpPath/apod.png" \
+            "$wpPath/apod_lock.png"; then
+            ShowMessage "apodFetch: error" \
+                "Lock-screen effect failed"
+            return 1
+        fi
+    else
+        cp "$wpPath/apod.png" "$wpPath/apod_lock.png" || return 1
+    fi
+
+    # Add a description without embedding shell-sensitive text in -draw.
+    if [[ "$lockscreenDesc" == "enabled" && -n "$description" ]]; then
+        if ! magick "$wpPath/apod_lock.png" \
+            -gravity northwest -pointsize 20 \
+            -fill white -undercolor black \
+            -annotate +10+20 "$description" \
+            "$wpPath/apod_lock.png"; then
+            ShowMessage "apodFetch: warning" \
+                "Could not add description to lock-screen image"
+        fi
+    fi
+
+    if ! feh --no-fehbg --bg-tile "$wpPath/apod.png"; then
+        ShowMessage "apodFetch: error" "feh could not set the wallpaper"
+        return 1
+    fi
+
+    return 0
 }
 
-EnsurePathExists $cachePath
+# Main
+EnsurePathExists "$cachePath"
+EnsurePathExists "$wpPath"
 
+GetParameters "${1:-}" "${2:-}" "${3:-}"
 
-EnsurePathExists $wpPath
+if ! DownloadPicture; then
+    exit 1
+fi
 
-GetParameters "$1" "$2" "$3"
-
-DownloadPicture
-
-ScaleAndSetWallpaper
+if ! ScaleAndSetWallpaper; then
+    exit 1
+fi
 
 ShowDescriptionAsNotification
